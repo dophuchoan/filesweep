@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.4.0 — 2026-11-13
+
+- New app icon (magnifier + checkmark): window/taskbar icon and the sidebar logo now use it.
+- Icon-first action buttons everywhere (Wise Care style): row actions are compact icons with a tooltip on hover — 🔍 scan this folder, ↗ open in Explorer, 🗑 Recycle Bin, ⚡ delete permanently, ★ keep this copy. The folder table's first button is now correctly presented as "scan this folder".
+- Duplicates: collapse/expand chevrons are now drawn triangles (the old ▾/▸ glyphs rendered as empty boxes on some systems), plus new Expand all / Collapse all buttons.
+- Fixed the Duplicates table overflowing/clipping its right-hand columns at narrower window widths: a long label in the toolbar row silently widened the whole panel; the group counts now sit on their own line and the toolbar/confirm rows wrap.
+- Tables no longer use draggable column resizing, so column widths are always computed from the current window size.
+
 ## 1.3.0 — 2026-11-13
 
 - Duplicates tab redesigned as a clean flat table (same style as the Disk tab): one header row per group (group size, copies, wasted space, quick-select button) and one row per file with aligned columns — toggle, path, size, wasted, actions. No more collapsible cards.

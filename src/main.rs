@@ -286,6 +286,7 @@ struct App {
     search_sel: HashMap<PathBuf, u64>,
     sugg_sel: HashMap<PathBuf, u64>,
     bulk_confirm: Option<(Vec<PathBuf>, u64, String, DeleteCtx, DeleteMode)>,
+    icon_tex: Option<egui::TextureHandle>,
     dupe_rows: Vec<DupeRow>,
     dupe_open: HashSet<(u64, String)>,
     dupe_rows_dirty: bool,
@@ -322,6 +323,11 @@ impl App {
         install_vietnamese_font(&cc.egui_ctx);
         let light0 = initial_light_ui();
         install_style(&cc.egui_ctx, light0);
+        let icon_tex = Some(cc.egui_ctx.load_texture(
+            "app-icon",
+            egui::ColorImage::from_rgba_unmultiplied([256, 256], ICON_RGBA),
+            egui::TextureOptions::LINEAR,
+        ));
         let (tx, rx) = std::sync::mpsc::channel();
         let home = std::env::var("USERPROFILE")
             .or_else(|_| std::env::var("HOME"))
@@ -353,6 +359,7 @@ impl App {
             search_sel: HashMap::new(),
             sugg_sel: HashMap::new(),
             bulk_confirm: None,
+            icon_tex,
             dupe_rows: Vec::new(),
             dupe_open: HashSet::new(),
             dupe_rows_dirty: true,
@@ -1257,6 +1264,37 @@ enum DupeRow {
     File(usize, usize, usize),
 }
 
+fn chevron(ui: &mut egui::Ui, open: bool) -> bool {
+    let (rect, resp) =
+        ui.allocate_exact_size(egui::vec2(22.0, 16.0), egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let visuals = ui.style().interact(&resp);
+        ui.painter()
+            .rect_filled(rect, egui::Rounding::same(4.0), visuals.bg_fill);
+        let c = rect.center();
+        let r = 4.2f32;
+        let pts = if open {
+            vec![
+                egui::pos2(c.x - r, c.y - r * 0.62),
+                egui::pos2(c.x + r, c.y - r * 0.62),
+                egui::pos2(c.x, c.y + r * 0.85),
+            ]
+        } else {
+            vec![
+                egui::pos2(c.x - r * 0.62, c.y - r),
+                egui::pos2(c.x - r * 0.62, c.y + r),
+                egui::pos2(c.x + r * 0.85, c.y),
+            ]
+        };
+        ui.painter().add(egui::Shape::convex_polygon(
+            pts,
+            visuals.fg_stroke.color,
+            egui::Stroke::NONE,
+        ));
+    }
+    resp.clicked()
+}
+
 fn dupe_keeper(kc: &HashMap<(u64, String), PathBuf>, g: &DupeGroup) -> PathBuf {
     if let Some(k) = kc.get(&(g.size, g.hash.clone())) {
         if g.paths.contains(k) {
@@ -1286,14 +1324,14 @@ fn file_table(
     let mut sort_changed = false;
     let mut table = TableBuilder::new(ui)
         .striped(false)
-        .resizable(true)
+        .resizable(false)
         .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
         .column(Column::initial(26.0).range(24.0..=30.0))
         .column(Column::initial(250.0).range(110.0..=800.0).clip(true))
         .column(Column::initial(92.0).range(70.0..=160.0))
         .column(Column::initial(92.0).range(76.0..=140.0))
         .column(Column::remainder().clip(true).resizable(false))
-        .column(Column::initial(196.0).range(170.0..=230.0));
+        .column(Column::initial(148.0).range(138.0..=190.0));
     if let Some(h) = max_height {
         table = table.max_scroll_height(h);
     }
@@ -1379,8 +1417,8 @@ fn file_table(
                 });
                 row.col(|ui| {
                     if ui
-                        .small_button("Open")
-                        .on_hover_text("Jump to the folder containing this file, right in the app")
+                        .small_button("🔍")
+                        .on_hover_text("Scan this file's folder — make it the current folder and scan it")
                         .clicked()
                     {
                         if let Some(parent) = e.path.parent() {
@@ -1388,7 +1426,7 @@ fn file_table(
                         }
                     }
                     if ui
-                        .small_button("↗ Open")
+                        .small_button("↗")
                         .on_hover_text("Open the containing folder in Explorer")
                         .clicked()
                     {
@@ -1450,12 +1488,17 @@ impl eframe::App for App {
                     .inner_margin(egui::Margin::same(12.0)),
             )
             .show(ctx, |ui| {
-                ui.label(
-                    egui::RichText::new("📁 FileSweep")
-                        .size(19.0)
-                        .strong()
-                        .color(ACCENT),
-                );
+                ui.horizontal(|ui| {
+                    if let Some(t) = &self.icon_tex {
+                        ui.image((t.id(), egui::vec2(24.0, 24.0)));
+                    }
+                    ui.label(
+                        egui::RichText::new("FileSweep")
+                            .size(19.0)
+                            .strong()
+                            .color(ACCENT),
+                    );
+                });
                 ui.label(
                     egui::RichText::new(concat!("v", env!("CARGO_PKG_VERSION")))
                         .size(11.0)
@@ -2193,7 +2236,7 @@ impl App {
             })
             .inner_margin(egui::Margin::same(8.0))
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     if mode == DeleteMode::Permanent {
                         ui.label(
                             egui::RichText::new(format!(
@@ -2264,7 +2307,7 @@ impl App {
             .fill(egui::Color32::from_rgb(52, 40, 40))
             .inner_margin(egui::Margin::same(8.0))
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     if mode == DeleteMode::Permanent {
                         ui.label(
                             egui::RichText::new(format!("PERMANENTLY delete file '{name}'?"))
@@ -2400,7 +2443,24 @@ impl App {
                 .iter()
                 .filter(|g| filesweep::group_all_user(&g.paths) && !g.hardlinked && !filesweep::group_has_pinokio(&g.paths))
                 .count();
-            ui.horizontal(|ui| {
+            let hl_groups = self.dupes.iter().filter(|g| g.hardlinked).count();
+            let pinokio_groups = self
+                .dupes
+                .iter()
+                .filter(|g| !g.hardlinked && filesweep::group_has_pinokio(&g.paths))
+                .count();
+            let protected_groups = self
+                .dupes
+                .iter()
+                .filter(|g| {
+                    !g.hardlinked
+                        && !filesweep::group_has_pinokio(&g.paths)
+                        && !filesweep::group_all_user(&g.paths)
+                    })
+                .count();
+            let user_groups = total_groups
+                .saturating_sub(hl_groups + pinokio_groups + protected_groups);
+            ui.horizontal_wrapped(|ui| {
                 if ui
                     .add_enabled(
                         self.busy.is_none() && self.delete_progress.is_none(),
@@ -2467,34 +2527,37 @@ impl App {
                     self.hide_protected = hide;
                     self.dupe_rows_dirty = true;
                 }
-                let hl_groups = self.dupes.iter().filter(|g| g.hardlinked).count();
-                let pinokio_groups = self
-                    .dupes
-                    .iter()
-                    .filter(|g| !g.hardlinked && filesweep::group_has_pinokio(&g.paths))
-                    .count();
-                let protected_groups = self
-                    .dupes
-                    .iter()
-                    .filter(|g| {
-                        !g.hardlinked
-                            && !filesweep::group_has_pinokio(&g.paths)
-                            && !filesweep::group_all_user(&g.paths)
-                    })
-                    .count();
-                let user_groups = total_groups
-                    .saturating_sub(hl_groups + pinokio_groups + protected_groups);
-                ui.label(
-                    egui::RichText::new(format!(
-                        "{} user-zone groups • {} system/app groups • {} Pinokio groups • {} hardlink groups (no extra space used)",
-                        fmt_num(user_groups),
-                        fmt_num(protected_groups),
-                        fmt_num(pinokio_groups),
-                        fmt_num(hl_groups)
-                    ))
-                    .color(MUTED),
-                );
+                if ui
+                    .small_button("Expand all")
+                    .on_hover_text("Expand every duplicate group")
+                    .clicked()
+                {
+                    self.dupe_open = self
+                        .dupes
+                        .iter()
+                        .map(|g| (g.size, g.hash.clone()))
+                        .collect();
+                    self.dupe_rows_dirty = true;
+                }
+                if ui
+                    .small_button("Collapse all")
+                    .on_hover_text("Collapse every duplicate group")
+                    .clicked()
+                {
+                    self.dupe_open.clear();
+                    self.dupe_rows_dirty = true;
+                }
             });
+            ui.label(
+                egui::RichText::new(format!(
+                    "{} user-zone groups • {} system/app groups • {} Pinokio groups • {} hardlink groups (no extra space used)",
+                    fmt_num(user_groups),
+                    fmt_num(protected_groups),
+                    fmt_num(pinokio_groups),
+                    fmt_num(hl_groups)
+                ))
+                .color(MUTED),
+            );
         }
         if !self.selected.is_empty() {
             ui.separator();
@@ -2692,13 +2755,13 @@ impl App {
         } = &mut *self;
         TableBuilder::new(ui)
             .striped(false)
-            .resizable(true)
+            .resizable(false)
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
             .column(Column::initial(30.0).range(28.0..=36.0))
             .column(Column::remainder().clip(true).resizable(false))
             .column(Column::initial(92.0).range(70.0..=160.0))
             .column(Column::initial(96.0).range(80.0..=150.0))
-            .column(Column::initial(172.0).range(150.0..=210.0))
+            .column(Column::initial(96.0).range(88.0..=130.0))
             .header(24.0, |mut header| {
                 header.col(|ui| {
                     ui.label("");
@@ -2730,7 +2793,7 @@ impl App {
                             let all_user = filesweep::group_all_user(&g.paths);
                             let keeper = dupe_keeper(keeper_choice, g);
                             row.col(|ui| {
-                                if ui.small_button(if is_open { "▾" } else { "▸" }).clicked() {
+                                if chevron(ui, is_open) {
                                     if is_open {
                                         dupe_open.remove(&key);
                                     } else {
@@ -2786,7 +2849,7 @@ impl App {
                             row.col(|ui| {
                                 if !g.hardlinked
                                     && ui
-                                        .small_button("⚡ Tick extra copies")
+                                        .small_button("⚡")
                                         .on_hover_text(format!(
                                             "Keeper: {}\nTick every other copy in this group — this group only. You still press delete yourself afterwards.",
                                             keeper.display()
@@ -2852,14 +2915,18 @@ impl App {
                                 ui.label("");
                             });
                             row.col(|ui| {
-                                if ui.small_button("↗ Open").clicked() {
+                                if ui
+                                    .small_button("↗")
+                                    .on_hover_text("Open the containing folder in Explorer")
+                                    .clicked()
+                                {
                                     if let Some(parent) = p.parent() {
                                         let _ = open::that(parent);
                                     }
                                 }
                                 if !g.hardlinked
                                     && ui
-                                        .small_button("★ Keep")
+                                        .small_button("★")
                                         .on_hover_text("Keep this copy — treat the rest of the group as duplicates")
                                         .clicked()
                                 {
@@ -3141,7 +3208,11 @@ impl App {
                             }
                             ui.label(egui::RichText::new(fmt_size(e.size)).color(ACCENT));
                             ui.label(fmt_date(e.modified_secs));
-                            if ui.small_button("↗ Open").clicked() {
+                            if ui
+                                .small_button("↗")
+                                .on_hover_text("Open the containing folder in Explorer")
+                                .clicked()
+                            {
                                 if let Some(parent) = e.path.parent() {
                                     open_path = Some(parent.to_path_buf());
                                 }
@@ -3217,12 +3288,12 @@ impl App {
         ui.push_id("toplevel-table", |ui| {
             TableBuilder::new(ui)
                 .striped(false)
-                .resizable(true)
+                .resizable(false)
                 .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
                 .column(Column::remainder().clip(true).resizable(false))
                 .column(Column::initial(110.0).range(80.0..=180.0))
                 .column(Column::initial(90.0).range(70.0..=140.0))
-                .column(Column::initial(128.0).range(110.0..=150.0))
+                .column(Column::initial(84.0).range(76.0..=110.0))
                 .max_scroll_height(210.0)
                 .header(24.0, |mut header| {
                 for (col, label) in [
@@ -3273,10 +3344,18 @@ impl App {
                         });
                     });
                     row.col(|ui| {
-                        if ui.small_button("Open").clicked() {
+                        if ui
+                            .small_button("🔍")
+                            .on_hover_text("Scan this folder — make it the current folder and scan it")
+                            .clicked()
+                        {
                             action = Some(FileAction::Navigate(dir.clone()));
                         }
-                        if ui.small_button("↗ Open").clicked() {
+                        if ui
+                            .small_button("↗")
+                            .on_hover_text("Open this folder in Explorer")
+                            .clicked()
+                        {
                             action = Some(FileAction::OpenExplorer(dir.clone()));
                         }
                     });
@@ -3315,7 +3394,11 @@ impl App {
                 .show(ui, |ui| {
                     for d in idx.empty_dirs.iter().take(300) {
                         ui.horizontal(|ui| {
-                            if ui.small_button("↗ Open").clicked() {
+                            if ui
+                                .small_button("↗")
+                                .on_hover_text("Open this folder in Explorer")
+                                .clicked()
+                            {
                                 let _ = open::that(d);
                             }
                             ui.label(d.display().to_string());
@@ -3330,9 +3413,16 @@ impl App {
     }
 }
 
+static ICON_RGBA: &[u8] = include_bytes!("../assets/icon.rgba");
+
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
+            .with_icon(std::sync::Arc::new(egui::IconData {
+                rgba: ICON_RGBA.to_vec(),
+                width: 256,
+                height: 256,
+            }))
             .with_inner_size([1180.0, 760.0])
             .with_min_inner_size([860.0, 540.0])
             .with_title(concat!("FileSweep v", env!("CARGO_PKG_VERSION"), " — Fast File Search · Duplicate Finder · Disk Cleanup")),

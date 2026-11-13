@@ -20,7 +20,7 @@ FileSweep scans a drive once, then lets you search millions of files instantly, 
 
 ## Download
 
-Grab the latest release zip (e.g. `FileSweep-v1.3.0.zip`) from the [Releases](../../releases) page, unzip anywhere and run `FileSweep.exe`. No installation, no admin rights needed. Windows 10/11, 64-bit.
+Grab the latest release zip (e.g. `FileSweep-v1.4.0.zip`) from the [Releases](../../releases) page, unzip anywhere and run `FileSweep.exe`. No installation, no admin rights needed. Windows 10/11, 64-bit.
 
 > The executable is not code-signed yet, so Windows SmartScreen may warn on first run — choose *More info → Run anyway* if you trust the source (you can also build from source below).
 
