@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.0 — 2026-11-13
+
+- Deletes are instant now: after a delete, the app filters its cached lists in place instead of rescanning the whole index (with a 2M-file index that rebuild — including cloning and sorting all entries just to pick the 200 largest — was what made even a 4-byte delete feel slow). Background pruning of the saved index is also coalesced instead of rewriting the file after every single delete.
+- "Restart as administrator" button in the sidebar (shown when the app is not elevated): deleting files inside C:\Windows, Program Files and other protected locations requires an elevated token — the app now says so explicitly when Windows denies access, instead of leaving the failure cryptic.
+- Rendering hardening: window/popup shadows off, and Light UI turns on automatically for RDP sessions when no theme choice has been saved.
+
 ## 1.1.0 — 2026-11-13
 
 - Multi-select delete: checkbox column (with select-all) in the Search and Largest-files tables and in Cleanup-tips detail lists, plus a selection bar with bulk Recycle Bin / permanent delete.

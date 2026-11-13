@@ -25,6 +25,7 @@ enum Msg {
     DupeProgress(usize, usize),
     DeleteProgress(usize, usize),
     DeleteDone(Box<DeleteOutcome>),
+    PruneDone,
 }
 
 enum DeleteCtx {
@@ -285,6 +286,8 @@ struct App {
     search_sel: HashMap<PathBuf, u64>,
     sugg_sel: HashMap<PathBuf, u64>,
     bulk_confirm: Option<(Vec<PathBuf>, u64, String, DeleteCtx, DeleteMode)>,
+    prune_busy: bool,
+    prune_pending: HashSet<PathBuf>,
     bg_tex: Option<egui::TextureHandle>,
     refresh_busy: bool,
     hide_protected: bool,
@@ -313,7 +316,8 @@ struct App {
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         install_vietnamese_font(&cc.egui_ctx);
-        install_style(&cc.egui_ctx, load_light_ui());
+        let light0 = initial_light_ui();
+        install_style(&cc.egui_ctx, light0);
         let (tx, rx) = std::sync::mpsc::channel();
         let home = std::env::var("USERPROFILE")
             .or_else(|_| std::env::var("HOME"))
@@ -345,6 +349,8 @@ impl App {
             search_sel: HashMap::new(),
             sugg_sel: HashMap::new(),
             bulk_confirm: None,
+            prune_busy: false,
+            prune_pending: HashSet::new(),
             bg_tex: None,
             refresh_busy: false,
             hide_protected: false,
@@ -352,7 +358,7 @@ impl App {
             dupe_skip_small: true,
             index_saved_at: 0,
             index_from_disk: false,
-            light_ui: load_light_ui(),
+            light_ui: light0,
             keeper_choice: HashMap::new(),
             deleted_paths: HashSet::new(),
             delete_progress: None,
@@ -625,6 +631,10 @@ impl App {
                 Msg::DeleteDone(out) => {
                     self.apply_delete_done(*out);
                 }
+                Msg::PruneDone => {
+                    self.prune_busy = false;
+                    self.kick_prune();
+                }
                 Msg::AnalyzeDone(s) => {
                     self.suggestions = s;
                     self.suggest_confirm = None;
@@ -744,6 +754,25 @@ impl App {
         thread::spawn(move || delete_worker(tx, paths, label, ctx, mode, cancel, ectx));
     }
 
+    fn kick_prune(&mut self) {
+        if self.prune_busy || self.prune_pending.is_empty() {
+            return;
+        }
+        let Some(idx) = &self.index else {
+            return;
+        };
+        let root = idx.root.clone();
+        let removed: HashSet<PathBuf> = std::mem::take(&mut self.prune_pending);
+        self.prune_busy = true;
+        let tx = self.tx.clone();
+        let ectx = self.egui_ctx.clone();
+        thread::spawn(move || {
+            prune_saved_index(&root, &removed);
+            let _ = tx.send(Msg::PruneDone);
+            ectx.request_repaint();
+        });
+    }
+
     fn apply_delete_done(&mut self, out: DeleteOutcome) {
         self.delete_progress = None;
 
@@ -775,10 +804,34 @@ impl App {
             self.dupes_stale = true;
         }
         if instant {
-
+            let mut removed_bytes: u64 = 0;
+            let mut top_delta: HashMap<PathBuf, (u64, usize)> = HashMap::new();
             if let Some(idx) = &mut self.index {
-                idx.entries.retain(|e| !removed.contains(&e.path));
-                idx.total_bytes = idx.entries.iter().map(|e| e.size).sum();
+                let root = idx.root.clone();
+                idx.entries.retain(|e| {
+                    if removed.contains(&e.path) {
+                        removed_bytes += e.size;
+                        let key = match e.path.strip_prefix(&root) {
+                            Ok(rel) => {
+                                let mut comps = rel.components();
+                                match comps.next() {
+                                    Some(c) if rel.components().count() > 1 => {
+                                        root.join(c.as_os_str())
+                                    }
+                                    _ => root.clone(),
+                                }
+                            }
+                            Err(_) => root.clone(),
+                        };
+                        let slot = top_delta.entry(key).or_default();
+                        slot.0 += e.size;
+                        slot.1 += 1;
+                        false
+                    } else {
+                        true
+                    }
+                });
+                idx.total_bytes = idx.total_bytes.saturating_sub(removed_bytes);
             }
             self.gen += 1;
             if !matches!(out.ctx, DeleteCtx::Dupes) && !self.dupes.is_empty() {
@@ -794,11 +847,24 @@ impl App {
             for s in self.suggestions.iter_mut() {
                 s.entries.retain(|e| !removed.contains(&e.path));
             }
-            if let Some(idx) = &self.index {
-                let root = idx.root.clone();
-                let removed2 = removed.clone();
-                thread::spawn(move || prune_saved_index(&root, &removed2));
+            self.cache.search.retain(|e| !removed.contains(&e.path));
+            self.cache.largest.retain(|e| !removed.contains(&e.path));
+            if !top_delta.is_empty() {
+                for row in self.cache.toplevel.iter_mut() {
+                    if let Some((b, n)) = top_delta.get(&row.0) {
+                        row.1 = row.1.saturating_sub(*b);
+                        row.2 = row.2.saturating_sub(*n);
+                    }
+                }
+                self.cache.toplevel.retain(|r| r.2 > 0);
             }
+            self.cache.gen = self.gen;
+            self.cache.query = self.query.clone();
+            self.cache.scol = Some(self.search_sort);
+            self.cache.lcol = Some(self.largest_sort);
+            self.cache.tcol = Some(self.toplevel_sort);
+            self.prune_pending.extend(removed.iter().cloned());
+            self.kick_prune();
         }
         self.status = format!(
             "{} {} {} ({}){}{}{}",
@@ -819,9 +885,21 @@ impl App {
                 String::new()
             },
             if out.fail > 0 {
+                let hint = match &out.first_error {
+                    Some(fe)
+                        if (fe.contains("Access is denied") || fe.contains("os error 5"))
+                            && !is_elevated() =>
+                    {
+                        " — Windows blocked it: the file sits in a protected location. Restart the app as administrator (sidebar) to delete files there."
+                    }
+                    _ => "",
+                };
                 match &out.first_error {
-                    Some(fe) => format!(" — {} files failed; first error: {}", out.fail, fe),
-                    None => format!(" — {} files failed", out.fail),
+                    Some(fe) => format!(
+                        " — {} files failed; first error: {}{}",
+                        out.fail, fe, hint
+                    ),
+                    None => format!(" — {} files failed{}", out.fail, hint),
                 }
             } else {
                 String::new()
@@ -865,9 +943,25 @@ impl App {
             .collect();
         sort_files(&mut search, self.search_sort);
 
-        let mut largest: Vec<FileEntry> = idx.entries.clone();
-        sort_files(&mut largest, self.largest_sort);
-        largest.truncate(200);
+        let mut largest: Vec<FileEntry> = {
+            let mut refs: Vec<&FileEntry> = idx.entries.iter().collect();
+            if refs.len() > 200 {
+                let (col, asc) = self.largest_sort;
+                refs.select_nth_unstable_by(199, |a, b| {
+                    let ord = match col {
+                        FCol::Name => a.name_lower.cmp(&b.name_lower),
+                        FCol::Size => a.size.cmp(&b.size),
+                        FCol::Date => a.modified_secs.cmp(&b.modified_secs),
+                        FCol::Path => a.path_lower.cmp(&b.path_lower),
+                    };
+                    if asc { ord } else { ord.reverse() }
+                });
+                refs.truncate(200);
+            }
+            let mut v: Vec<FileEntry> = refs.into_iter().cloned().collect();
+            sort_files(&mut v, self.largest_sort);
+            v
+        };
 
         let mut toplevel = filesweep::top_level_sizes(idx);
         let (tc, tasc) = self.toplevel_sort;
@@ -1006,6 +1100,8 @@ fn install_style(ctx: &egui::Context, light: bool) {
     style.animation_time = 0.0;
 
     let mut v = egui::Visuals::dark();
+    v.window_shadow = egui::epaint::Shadow::NONE;
+    v.popup_shadow = egui::epaint::Shadow::NONE;
     let glass_stroke = egui::Stroke::new(
         1.0,
         egui::Color32::from_rgba_unmultiplied(255, 255, 255, 34),
@@ -1417,6 +1513,21 @@ impl eframe::App for App {
                         if self.skip_perm_confirm { "1" } else { "0" },
                     );
                 }
+                if !is_elevated() {
+                    ui.add_space(4.0);
+                    if ui
+                        .button("\u{1f6e1} Restart as administrator")
+                        .on_hover_text("Deleting files inside C:\\Windows, Program Files and other protected folders needs an elevated token. This restarts FileSweep with one (Windows asks once via UAC).")
+                        .clicked()
+                    {
+                        if relaunch_elevated() {
+                            std::process::exit(0);
+                        } else {
+                            self.status =
+                                "Could not restart as administrator (UAC declined?).".to_string();
+                        }
+                    }
+                }
                 if let Some(idx) = &self.index {
                     ui.add_space(6.0);
                     ui.label(
@@ -1661,8 +1772,83 @@ fn save_setting(key: &str, value: &str) {
     let _ = std::fs::write(p, lines.join("\n"));
 }
 
-fn load_light_ui() -> bool {
-    load_setting("light_ui").as_deref() == Some("1")
+#[cfg(windows)]
+fn is_elevated() -> bool {
+    extern "system" {
+        fn IsUserAnAdmin() -> i32;
+    }
+    unsafe { IsUserAnAdmin() != 0 }
+}
+
+#[cfg(not(windows))]
+fn is_elevated() -> bool {
+    true
+}
+
+#[cfg(windows)]
+fn relaunch_elevated() -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    extern "system" {
+        fn ShellExecuteW(
+            hwnd: isize,
+            op: *const u16,
+            file: *const u16,
+            params: *const u16,
+            dir: *const u16,
+            show: i32,
+        ) -> isize;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    let op: Vec<u16> = "runas\0".encode_utf16().collect();
+    let file: Vec<u16> = exe
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let r = unsafe {
+        ShellExecuteW(
+            0,
+            op.as_ptr(),
+            file.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1,
+        )
+    };
+    r > 32
+}
+
+#[cfg(not(windows))]
+fn relaunch_elevated() -> bool {
+    false
+}
+
+fn is_remote_session() -> bool {
+    if let Ok(sn) = std::env::var("SESSIONNAME") {
+        if sn.to_lowercase().starts_with("rdp") {
+            return true;
+        }
+    }
+    #[cfg(windows)]
+    {
+        extern "system" {
+            fn GetSystemMetrics(n_index: i32) -> i32;
+        }
+        unsafe {
+            return GetSystemMetrics(0x1000) != 0;
+        }
+    }
+    #[allow(unreachable_code)]
+    false
+}
+
+fn initial_light_ui() -> bool {
+    match load_setting("light_ui") {
+        Some(v) => v == "1",
+        None => is_remote_session(),
+    }
 }
 
 fn save_light_ui(light: bool) {
