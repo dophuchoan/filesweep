@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.0 — 2026-11-13
+
+- Multi-select delete: checkbox column (with select-all) in the Search and Largest-files tables and in Cleanup-tips detail lists, plus a selection bar with bulk Recycle Bin / permanent delete.
+- Permanent-delete confirmations now offer "Don't ask again" (remembered across runs); a sidebar toggle "Ask before permanent delete" brings the confirmation back at any time. When remembered, every permanent-delete button acts immediately.
+- Fixed two stacked path tooltips when hovering a file row (the file-name cell carried the same tooltip as the path cell; tooltip fade stacking removed as well).
+- Fixed doubled checkmarks ("✔✔") on permanent-delete confirm buttons.
+- Flicker reduction, round two: the glass background (gradient + glow spots) is now rendered once into a static texture instead of being re-drawn every frame, and widget hover transitions are instant (animation time 0), so repaints are pixel-identical — much friendlier to remote-desktop encoders.
+
 ## 1.0.0 — 2026-11-13
 
 First public release under the FileSweep name.

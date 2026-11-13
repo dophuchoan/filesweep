@@ -280,6 +280,12 @@ struct App {
     suggest_perm_arm: bool,
     dupes_perm_arm: bool,
     single_confirm: Option<(PathBuf, DeleteMode)>,
+    skip_perm_confirm: bool,
+    dont_ask_perm: bool,
+    search_sel: HashMap<PathBuf, u64>,
+    sugg_sel: HashMap<PathBuf, u64>,
+    bulk_confirm: Option<(Vec<PathBuf>, u64, String, DeleteCtx, DeleteMode)>,
+    bg_tex: Option<egui::TextureHandle>,
     refresh_busy: bool,
     hide_protected: bool,
     dupe_skip_protected: bool,
@@ -334,6 +340,12 @@ impl App {
             suggest_perm_arm: false,
             dupes_perm_arm: false,
             single_confirm: None,
+            skip_perm_confirm: load_setting("skip_perm_confirm").as_deref() == Some("1"),
+            dont_ask_perm: false,
+            search_sel: HashMap::new(),
+            sugg_sel: HashMap::new(),
+            bulk_confirm: None,
+            bg_tex: None,
             refresh_busy: false,
             hide_protected: false,
             dupe_skip_protected: true,
@@ -384,6 +396,9 @@ impl App {
         }
         self.busy = Some(format!("Scanning {} ...", root.display()));
         self.confirm_delete = false;
+        self.search_sel.clear();
+        self.sugg_sel.clear();
+        self.bulk_confirm = None;
         let tx = self.tx.clone();
         let ectx = self.egui_ctx.clone();
         thread::spawn(move || {
@@ -734,6 +749,8 @@ impl App {
 
         let mut removed: HashSet<PathBuf> = out.ok.iter().cloned().collect();
         removed.extend(out.gone.iter().cloned());
+        self.search_sel.retain(|p, _| !removed.contains(p));
+        self.sugg_sel.retain(|p, _| !removed.contains(p));
         for p in &removed {
             self.deleted_paths.insert(p.clone());
         }
@@ -930,6 +947,45 @@ fn install_vietnamese_font(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
+fn make_bg_texture(ctx: &egui::Context) -> egui::TextureHandle {
+    let (w, h) = (512usize, 320usize);
+    let top = [24.0f32, 36.0, 51.0];
+    let bottom = [10.0f32, 14.0, 21.0];
+    let aspect = 1180.0f32 / 760.0;
+    let glows: [((f32, f32), f32, [f32; 3], f32); 2] = [
+        ((0.94, -0.07), 0.395, [80.0, 180.0, 255.0], 5.0 / 255.0),
+        ((0.03, 1.09), 0.316, [64.0, 224.0, 190.0], 4.0 / 255.0),
+    ];
+    let mut px = vec![0u8; w * h * 3];
+    for y in 0..h {
+        let v = y as f32 / (h - 1) as f32;
+        for x in 0..w {
+            let u = x as f32 / (w - 1) as f32;
+            let mut c = [
+                top[0] + (bottom[0] - top[0]) * v,
+                top[1] + (bottom[1] - top[1]) * v,
+                top[2] + (bottom[2] - top[2]) * v,
+            ];
+            for ((cx, cy), r, col, a) in &glows {
+                let dx = (u - cx) * aspect;
+                let dy = v - cy;
+                let d = (dx * dx + dy * dy).sqrt();
+                let t = (1.0 - d / r).clamp(0.0, 1.0);
+                let alpha = a * t * t;
+                for i in 0..3 {
+                    c[i] = c[i] * (1.0 - alpha) + col[i] * alpha;
+                }
+            }
+            let o = (y * w + x) * 3;
+            px[o] = c[0].clamp(0.0, 255.0) as u8;
+            px[o + 1] = c[1].clamp(0.0, 255.0) as u8;
+            px[o + 2] = c[2].clamp(0.0, 255.0) as u8;
+        }
+    }
+    let img = egui::ColorImage::from_rgb([w, h], &px);
+    ctx.load_texture("filesweep-bg", img, egui::TextureOptions::LINEAR)
+}
+
 fn install_style(ctx: &egui::Context, light: bool) {
     let mut style = (*ctx.style()).clone();
     use egui::{FontId, TextStyle};
@@ -947,6 +1003,7 @@ fn install_style(ctx: &egui::Context, light: bool) {
         .insert(TextStyle::Small, FontId::proportional(11.0));
     style.spacing.item_spacing = egui::Vec2::new(6.0, 4.0);
     style.spacing.button_padding = egui::Vec2::new(9.0, 4.0);
+    style.animation_time = 0.0;
 
     let mut v = egui::Visuals::dark();
     let glass_stroke = egui::Stroke::new(
@@ -1057,6 +1114,7 @@ fn file_table(
     rows: &[FileEntry],
     sort: &mut (FCol, bool),
     max_height: Option<f32>,
+    sel: &mut HashMap<PathBuf, u64>,
 ) -> (Option<FileAction>, bool) {
     let mut action: Option<FileAction> = None;
     let mut sort_changed = false;
@@ -1064,6 +1122,7 @@ fn file_table(
         .striped(true)
         .resizable(true)
         .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+        .column(Column::initial(26.0).range(24.0..=30.0))
         .column(Column::initial(250.0).range(110.0..=800.0).clip(true))
         .column(Column::initial(92.0).range(70.0..=160.0))
         .column(Column::initial(92.0).range(76.0..=140.0))
@@ -1074,6 +1133,25 @@ fn file_table(
     }
     table
         .header(24.0, |mut header| {
+            header.col(|ui| {
+                let all = !rows.is_empty() && rows.iter().all(|e| sel.contains_key(&e.path));
+                let mut all_on = all;
+                if ui
+                    .checkbox(&mut all_on, "")
+                    .on_hover_text("Select / unselect all files in this list")
+                    .changed()
+                {
+                    if all_on {
+                        for e in rows {
+                            sel.insert(e.path.clone(), e.size);
+                        }
+                    } else {
+                        for e in rows {
+                            sel.remove(&e.path);
+                        }
+                    }
+                }
+            });
             for (col, label) in [
                 (FCol::Name, "File name"),
                 (FCol::Size, "Size"),
@@ -1109,7 +1187,17 @@ fn file_table(
             body.rows(22.0, rows.len(), |mut row| {
                 let e = &rows[row.index()];
                 row.col(|ui| {
-                    ui.label(&e.name).on_hover_text(e.path.display().to_string());
+                    let mut on = sel.contains_key(&e.path);
+                    if ui.checkbox(&mut on, "").changed() {
+                        if on {
+                            sel.insert(e.path.clone(), e.size);
+                        } else {
+                            sel.remove(&e.path);
+                        }
+                    }
+                });
+                row.col(|ui| {
+                    ui.label(&e.name);
                 });
                 row.col(|ui| {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1317,6 +1405,18 @@ impl eframe::App for App {
                     install_style(ctx, light);
                     save_light_ui(light);
                 }
+                let mut ask_perm = !self.skip_perm_confirm;
+                if ui
+                    .checkbox(&mut ask_perm, "Ask before permanent delete")
+                    .on_hover_text("When unticked, the \u{26a1} permanent-delete buttons delete immediately, with no confirmation step. Deletes to the Recycle Bin are unaffected. Tick it again here any time to bring the confirmation back.")
+                    .changed()
+                {
+                    self.skip_perm_confirm = !ask_perm;
+                    save_setting(
+                        "skip_perm_confirm",
+                        if self.skip_perm_confirm { "1" } else { "0" },
+                    );
+                }
                 if let Some(idx) = &self.index {
                     ui.add_space(6.0);
                     ui.label(
@@ -1415,44 +1515,17 @@ impl eframe::App for App {
             }
             if !self.light_ui {
                 let rect = ui.max_rect();
-                let painter = ui.painter();
-                let top = egui::Color32::from_rgb(24, 36, 51);
-                let bottom = egui::Color32::from_rgb(10, 14, 21);
-                let mut mesh = egui::Mesh::default();
-                mesh.vertices = vec![
-                    egui::epaint::Vertex {
-                        pos: rect.left_top(),
-                        uv: egui::Pos2::ZERO,
-                        color: top,
-                    },
-                    egui::epaint::Vertex {
-                        pos: rect.right_top(),
-                        uv: egui::Pos2::ZERO,
-                        color: top,
-                    },
-                    egui::epaint::Vertex {
-                        pos: rect.left_bottom(),
-                        uv: egui::Pos2::ZERO,
-                        color: bottom,
-                    },
-                    egui::epaint::Vertex {
-                        pos: rect.right_bottom(),
-                        uv: egui::Pos2::ZERO,
-                        color: bottom,
-                    },
-                ];
-                mesh.indices = vec![0, 1, 2, 2, 1, 3];
-                painter.add(egui::Shape::mesh(mesh));
-                painter.circle_filled(
-                    egui::pos2(rect.right() - 70.0, rect.top() - 50.0),
-                    300.0,
-                    egui::Color32::from_rgba_unmultiplied(80, 180, 255, 5),
-                );
-                painter.circle_filled(
-                    egui::pos2(rect.left() + 30.0, rect.bottom() + 70.0),
-                    240.0,
-                    egui::Color32::from_rgba_unmultiplied(64, 224, 190, 4),
-                );
+                if self.bg_tex.is_none() {
+                    self.bg_tex = Some(make_bg_texture(ctx));
+                }
+                if let Some(tex) = &self.bg_tex {
+                    ui.painter().image(
+                        tex.id(),
+                        rect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        egui::Color32::WHITE,
+                    );
+                }
             }
 
             ui.horizontal(|ui| {
@@ -1496,6 +1569,7 @@ impl eframe::App for App {
             });
             ui.add_space(2.0);
             self.ui_single_confirm(ui);
+            self.ui_bulk_confirm(ui);
             match self.tab {
                 Tab::Search => {
                     if let Some(a) = self.ui_search(ui) {
@@ -1536,7 +1610,15 @@ impl eframe::App for App {
                 let _ = open::that(&p);
             }
             Some(FileAction::AskDelete(p, m)) => {
-                self.single_confirm = Some((p, m));
+                if m == DeleteMode::Permanent && self.skip_perm_confirm {
+                    let name = p
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| p.display().to_string());
+                    self.start_delete(vec![p], name, DeleteCtx::Single, m);
+                } else {
+                    self.single_confirm = Some((p, m));
+                }
             }
             None => {}
         }
@@ -1547,18 +1629,44 @@ fn settings_file() -> PathBuf {
     data_dir().join("settings.txt")
 }
 
-fn load_light_ui() -> bool {
-    std::fs::read_to_string(settings_file())
-        .map(|s| s.trim() == "light_ui=1")
-        .unwrap_or(false)
+fn load_setting(key: &str) -> Option<String> {
+    let s = std::fs::read_to_string(settings_file()).ok()?;
+    for line in s.lines() {
+        if let Some((k, v)) = line.split_once('=') {
+            if k.trim() == key {
+                return Some(v.trim().to_string());
+            }
+        }
+    }
+    None
 }
 
-fn save_light_ui(light: bool) {
+fn save_setting(key: &str, value: &str) {
     let p = settings_file();
     if let Some(parent) = p.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _ = std::fs::write(p, if light { "light_ui=1" } else { "light_ui=0" });
+    let mut lines: Vec<String> = std::fs::read_to_string(&p)
+        .map(|s| {
+            s.lines()
+                .filter(|l| {
+                    !l.trim().is_empty()
+                        && l.split_once('=').map(|(k, _)| k.trim() != key).unwrap_or(true)
+                })
+                .map(|l| l.to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    lines.push(format!("{key}={value}"));
+    let _ = std::fs::write(p, lines.join("\n"));
+}
+
+fn load_light_ui() -> bool {
+    load_setting("light_ui").as_deref() == Some("1")
+}
+
+fn save_light_ui(light: bool) {
+    save_setting("light_ui", if light { "1" } else { "0" });
 }
 
 fn data_dir() -> PathBuf {
@@ -1725,6 +1833,167 @@ fn short_title(t: &str) -> String {
 
 impl App {
 
+    fn sel_bar(&mut self, ui: &mut egui::Ui, sugg_cat: Option<usize>) {
+        let (count, bytes, paths, ctx): (usize, u64, Vec<PathBuf>, DeleteCtx) = match sugg_cat {
+            Some(cat) => {
+                let in_cat: Vec<PathBuf> = match self.suggestions.get(cat) {
+                    Some(sg) => sg
+                        .entries
+                        .iter()
+                        .map(|e| e.path.clone())
+                        .filter(|p| self.sugg_sel.contains_key(p))
+                        .collect(),
+                    None => Vec::new(),
+                };
+                let b: u64 = in_cat
+                    .iter()
+                    .map(|p| self.sugg_sel.get(p).copied().unwrap_or(0))
+                    .sum();
+                let n = in_cat.len();
+                (n, b, in_cat, DeleteCtx::Suggest(cat))
+            }
+            None => (
+                self.search_sel.len(),
+                self.search_sel.values().sum(),
+                self.search_sel.keys().cloned().collect(),
+                DeleteCtx::Single,
+            ),
+        };
+        if count == 0 {
+            return;
+        }
+        let mut act: Option<DeleteMode> = None;
+        let mut clear = false;
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(format!(
+                    "\u{2611} {} {} selected ({})",
+                    fmt_num(count),
+                    if count == 1 { "file" } else { "files" },
+                    fmt_size(bytes)
+                ))
+                .strong(),
+            );
+            if ui
+                .add_enabled(
+                    self.delete_progress.is_none(),
+                    egui::Button::new("\u{1f5d1} Move to Recycle Bin"),
+                )
+                .clicked()
+            {
+                act = Some(DeleteMode::Trash);
+            }
+            if ui
+                .add_enabled(
+                    self.delete_progress.is_none(),
+                    egui::Button::new("\u{26a1} Delete permanently"),
+                )
+                .clicked()
+            {
+                act = Some(DeleteMode::Permanent);
+            }
+            if ui.button("Clear selection").clicked() {
+                clear = true;
+            }
+        });
+        ui.add_space(4.0);
+        if clear {
+            match sugg_cat {
+                Some(_) => self.sugg_sel.clear(),
+                None => self.search_sel.clear(),
+            }
+            return;
+        }
+        if let Some(mode) = act {
+            let label = match &ctx {
+                DeleteCtx::Suggest(cat) => self
+                    .suggestions
+                    .get(*cat)
+                    .map(|sg| sg.title.clone())
+                    .unwrap_or_else(|| "selected files".to_string()),
+                _ => "selected files".to_string(),
+            };
+            if mode == DeleteMode::Permanent && self.skip_perm_confirm {
+                self.start_delete(paths, label, ctx, mode);
+            } else {
+                self.bulk_confirm = Some((paths, bytes, label, ctx, mode));
+            }
+        }
+    }
+
+    fn ui_bulk_confirm(&mut self, ui: &mut egui::Ui) {
+        let (count, bytes, mode) = match &self.bulk_confirm {
+            Some((paths, bytes, _, _, mode)) => (paths.len(), *bytes, *mode),
+            None => return,
+        };
+        let noun = if count == 1 { "file" } else { "files" };
+        let mut go = false;
+        let mut cancel = false;
+        egui::Frame::none()
+            .fill(if mode == DeleteMode::Permanent {
+                egui::Color32::from_rgb(52, 40, 40)
+            } else {
+                egui::Color32::from_rgb(35, 45, 60)
+            })
+            .inner_margin(egui::Margin::same(8.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if mode == DeleteMode::Permanent {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "PERMANENTLY delete {} {} ({}) \u{2014} this cannot be undone!",
+                                fmt_num(count),
+                                noun,
+                                fmt_size(bytes)
+                            ))
+                            .color(egui::Color32::from_rgb(240, 110, 110))
+                            .strong(),
+                        );
+                    } else {
+                        ui.label(format!(
+                            "Move {} {} ({}) to the Recycle Bin?",
+                            fmt_num(count),
+                            noun,
+                            fmt_size(bytes)
+                        ));
+                    }
+                    if ui
+                        .add_enabled(
+                            self.delete_progress.is_none(),
+                            egui::Button::new("\u{2714} Delete"),
+                        )
+                        .clicked()
+                    {
+                        go = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+                if mode == DeleteMode::Permanent {
+                    ui.checkbox(
+                        &mut self.dont_ask_perm,
+                        "Don't ask again \u{2014} always delete permanently without confirming",
+                    );
+                }
+            });
+        ui.add_space(6.0);
+        if cancel {
+            self.bulk_confirm = None;
+            self.dont_ask_perm = false;
+        }
+        if go {
+            if mode == DeleteMode::Permanent && self.dont_ask_perm {
+                self.skip_perm_confirm = true;
+                save_setting("skip_perm_confirm", "1");
+            }
+            self.dont_ask_perm = false;
+            if let Some((paths, _b, label, ctx, mode)) = self.bulk_confirm.take() {
+                self.start_delete(paths, label, ctx, mode);
+            }
+        }
+    }
+
     fn ui_single_confirm(&mut self, ui: &mut egui::Ui) {
         let Some((path, mode)) = self.single_confirm.clone() else {
             return;
@@ -1753,7 +2022,7 @@ impl App {
                         .add_enabled(
                             self.delete_progress.is_none(),
                             egui::Button::new(if mode == DeleteMode::Permanent {
-                                "✔✔ Delete it"
+                                "✔ Delete it"
                             } else {
                                 "✔ Delete"
                             }),
@@ -1766,6 +2035,12 @@ impl App {
                         cancel = true;
                     }
                 });
+                if mode == DeleteMode::Permanent {
+                    ui.checkbox(
+                        &mut self.dont_ask_perm,
+                        "Don't ask again \u{2014} always delete permanently without confirming",
+                    );
+                }
                 ui.label(
                     egui::RichText::new(path.display().to_string())
                         .small()
@@ -1775,8 +2050,14 @@ impl App {
         ui.add_space(6.0);
         if cancel {
             self.single_confirm = None;
+            self.dont_ask_perm = false;
         }
         if go {
+            if mode == DeleteMode::Permanent && self.dont_ask_perm {
+                self.skip_perm_confirm = true;
+                save_setting("skip_perm_confirm", "1");
+            }
+            self.dont_ask_perm = false;
             self.single_confirm = None;
             self.start_delete(vec![path], name, DeleteCtx::Single, mode);
         }
@@ -1807,9 +2088,10 @@ impl App {
             );
         });
         ui.add_space(4.0);
+        self.sel_bar(ui, None);
         let rows = self.cache.search.clone();
         let (action, _) = ui.push_id("search-table", |ui| {
-            file_table(ui, &rows, &mut self.search_sort, None)
+            file_table(ui, &rows, &mut self.search_sort, None, &mut self.search_sel)
         }).inner;
         action
     }
@@ -2069,8 +2351,12 @@ impl App {
                         )
                         .clicked()
                     {
-                        self.confirm_delete = true;
-                        self.dupes_perm_arm = true;
+                        if self.skip_perm_confirm {
+                            self.delete_selected_mode(DeleteMode::Permanent);
+                        } else {
+                            self.confirm_delete = true;
+                            self.dupes_perm_arm = true;
+                        }
                     }
                 } else if !self.dupes_perm_arm {
                     ui.label(format!(
@@ -2089,7 +2375,13 @@ impl App {
                             .color(egui::Color32::from_rgb(240, 110, 110))
                             .strong(),
                     );
-                    if ui.button("✔✔ Yes, delete permanently").clicked() {
+                    ui.checkbox(&mut self.dont_ask_perm, "Don't ask again");
+                    if ui.button("✔ Yes, delete permanently").clicked() {
+                        if self.dont_ask_perm {
+                            self.skip_perm_confirm = true;
+                            save_setting("skip_perm_confirm", "1");
+                            self.dont_ask_perm = false;
+                        }
                         self.delete_selected_mode(DeleteMode::Permanent);
                     }
                     if ui.button("Back").clicked() {
@@ -2451,6 +2743,7 @@ impl App {
         let mut delete_mode: Option<DeleteMode> = None;
         let mut open_path: Option<PathBuf> = None;
         let mut single_act: Option<(PathBuf, DeleteMode)> = None;
+        self.sel_bar(ui, Some(sel));
         {
             let s = &self.suggestions[sel];
             ui.label(egui::RichText::new(s.title.clone()).heading());
@@ -2483,8 +2776,12 @@ impl App {
                             .on_hover_text("Delete directly like CCleaner — much faster but NOT recoverable")
                             .clicked()
                         {
-                            self.suggest_confirm = Some(sel);
-                            self.suggest_perm_arm = true;
+                            if self.skip_perm_confirm {
+                                delete_mode = Some(DeleteMode::Permanent);
+                            } else {
+                                self.suggest_confirm = Some(sel);
+                                self.suggest_perm_arm = true;
+                            }
                         }
                     });
                 } else if self.suggest_confirm == Some(sel) && !self.suggest_perm_arm {
@@ -2512,7 +2809,13 @@ impl App {
                             .color(egui::Color32::from_rgb(240, 110, 110))
                             .strong(),
                         );
-                        if ui.button("✔✔ Yes, delete permanently").clicked() {
+                        ui.checkbox(&mut self.dont_ask_perm, "Don't ask again");
+                        if ui.button("✔ Yes, delete permanently").clicked() {
+                            if self.dont_ask_perm {
+                                self.skip_perm_confirm = true;
+                                save_setting("skip_perm_confirm", "1");
+                                self.dont_ask_perm = false;
+                            }
                             delete_mode = Some(DeleteMode::Permanent);
                         }
                         if ui.button("Back").clicked() {
@@ -2528,6 +2831,14 @@ impl App {
                 .show(ui, |ui| {
                     for e in s.entries.iter().take(300) {
                         ui.horizontal(|ui| {
+                            let mut on = self.sugg_sel.contains_key(&e.path);
+                            if ui.checkbox(&mut on, "").changed() {
+                                if on {
+                                    self.sugg_sel.insert(e.path.clone(), e.size);
+                                } else {
+                                    self.sugg_sel.remove(&e.path);
+                                }
+                            }
                             ui.label(egui::RichText::new(fmt_size(e.size)).color(ACCENT));
                             ui.label(fmt_date(e.modified_secs));
                             if ui.small_button("↗ Open").clicked() {
@@ -2567,7 +2878,16 @@ impl App {
             let _ = open::that(&p);
         }
         if let Some(act) = single_act {
-            self.single_confirm = Some(act);
+            if act.1 == DeleteMode::Permanent && self.skip_perm_confirm {
+                let name = act
+                    .0
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| act.0.display().to_string());
+                self.start_delete(vec![act.0.clone()], name, DeleteCtx::Single, DeleteMode::Permanent);
+            } else {
+                self.single_confirm = Some(act);
+            }
         }
         if let Some(mode) = delete_mode {
             self.suggest_confirm = None;
@@ -2671,11 +2991,12 @@ impl App {
         ui.label(egui::RichText::new("Largest files").heading());
         let largest = self.cache.largest.clone();
         let (a2, _) = ui.push_id("largest-table", |ui| {
-            file_table(ui, &largest, &mut self.largest_sort, Some(240.0))
+            file_table(ui, &largest, &mut self.largest_sort, Some(240.0), &mut self.search_sel)
         }).inner;
         if a2.is_some() {
             action = a2;
         }
+        self.sel_bar(ui, None);
 
         ui.add_space(6.0);
         if let Some(idx) = &self.index {

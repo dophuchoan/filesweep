@@ -1,6 +1,6 @@
 [package]
 name = "filesweep"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 description = "Fast file search, duplicate finder and disk cleanup for Windows (Rust)"
 license = "MIT"
