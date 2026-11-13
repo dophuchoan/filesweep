@@ -286,6 +286,10 @@ struct App {
     search_sel: HashMap<PathBuf, u64>,
     sugg_sel: HashMap<PathBuf, u64>,
     bulk_confirm: Option<(Vec<PathBuf>, u64, String, DeleteCtx, DeleteMode)>,
+    dupe_rows: Vec<DupeRow>,
+    dupe_open: HashSet<(u64, String)>,
+    dupe_rows_dirty: bool,
+    dupe_open_reset: bool,
     prune_busy: bool,
     prune_pending: HashSet<PathBuf>,
     bg_tex: Option<egui::TextureHandle>,
@@ -349,6 +353,10 @@ impl App {
             search_sel: HashMap::new(),
             sugg_sel: HashMap::new(),
             bulk_confirm: None,
+            dupe_rows: Vec::new(),
+            dupe_open: HashSet::new(),
+            dupe_rows_dirty: true,
+            dupe_open_reset: true,
             prune_busy: false,
             prune_pending: HashSet::new(),
             bg_tex: None,
@@ -556,7 +564,42 @@ impl App {
         });
     }
 
+    fn rebuild_dupe_rows(&mut self) {
+        if self.dupe_open_reset {
+            self.dupe_open.clear();
+            self.dupe_open_reset = false;
+            let mut n = 0usize;
+            for g in &self.dupes {
+                if self.hide_protected && !filesweep::group_all_user(&g.paths) {
+                    continue;
+                }
+                self.dupe_open.insert((g.size, g.hash.clone()));
+                n += 1;
+                if n >= 5 {
+                    break;
+                }
+            }
+        }
+        self.dupe_rows.clear();
+        let mut ordinal = 0usize;
+        for (gi, g) in self.dupes.iter().enumerate() {
+            if self.hide_protected && !filesweep::group_all_user(&g.paths) {
+                continue;
+            }
+            ordinal += 1;
+            self.dupe_rows.push(DupeRow::Header(gi, ordinal));
+            if self.dupe_open.contains(&(g.size, g.hash.clone())) {
+                for pi in 0..g.paths.len() {
+                    self.dupe_rows.push(DupeRow::File(gi, ordinal, pi));
+                }
+            }
+        }
+        self.dupe_rows_dirty = false;
+    }
+
     fn sort_dupes(&mut self) {
+        self.dupe_open_reset = true;
+        self.dupe_rows_dirty = true;
         match self.dupe_sort {
             DSort::Wasted => self.dupes.sort_by(|a, b| b.wasted().cmp(&a.wasted())),
             DSort::Size => self.dupes.sort_by(|a, b| b.size.cmp(&a.size)),
@@ -592,6 +635,8 @@ impl App {
                             if n_saved > 0 {
                                 self.dupes = saved_dupes;
                                 self.dupes_stale = false;
+                                self.dupe_open_reset = true;
+                                self.dupe_rows_dirty = true;
                             } else {
                                 self.dupes_stale = true;
                             }
@@ -799,6 +844,7 @@ impl App {
                 }
             }
         }
+        self.dupe_rows_dirty = true;
         let instant = !removed.is_empty() && removed.len() <= 5000;
         if !removed.is_empty() {
             self.dupes_stale = true;
@@ -1205,6 +1251,30 @@ fn fmt_num(n: usize) -> String {
     out
 }
 
+#[derive(Clone, Copy)]
+enum DupeRow {
+    Header(usize, usize),
+    File(usize, usize, usize),
+}
+
+fn dupe_keeper(kc: &HashMap<(u64, String), PathBuf>, g: &DupeGroup) -> PathBuf {
+    if let Some(k) = kc.get(&(g.size, g.hash.clone())) {
+        if g.paths.contains(k) {
+            return k.clone();
+        }
+    }
+    g.paths
+        .iter()
+        .min_by(|a, b| {
+            a.as_os_str()
+                .len()
+                .cmp(&b.as_os_str().len())
+                .then_with(|| a.cmp(b))
+        })
+        .unwrap()
+        .clone()
+}
+
 fn file_table(
     ui: &mut egui::Ui,
     rows: &[FileEntry],
@@ -1215,7 +1285,7 @@ fn file_table(
     let mut action: Option<FileAction> = None;
     let mut sort_changed = false;
     let mut table = TableBuilder::new(ui)
-        .striped(true)
+        .striped(false)
         .resizable(true)
         .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
         .column(Column::initial(26.0).range(24.0..=30.0))
@@ -2395,6 +2465,7 @@ impl App {
                     .changed()
                 {
                     self.hide_protected = hide;
+                    self.dupe_rows_dirty = true;
                 }
                 let hl_groups = self.dupes.iter().filter(|g| g.hardlinked).count();
                 let pinokio_groups = self
@@ -2582,185 +2653,228 @@ impl App {
             });
         }
         ui.separator();
-        let groups: Vec<(u64, usize, u64, Vec<PathBuf>, bool, bool, String)> = self
-            .dupes
-            .iter()
-            .map(|g| {
-                (
-                    g.size,
-                    g.paths.len(),
-                    g.wasted(),
-                    g.paths.clone(),
-                    filesweep::group_all_user(&g.paths),
-                    g.hardlinked,
-                    g.hash.clone(),
-                )
-            })
-            .collect();
-        let total_wasted: u64 = groups.iter().map(|g| g.2).sum();
-        let visible: Vec<&(u64, usize, u64, Vec<PathBuf>, bool, bool, String)> = groups
-            .iter()
-            .filter(|g| !self.hide_protected || g.4)
-            .collect();
-        if !groups.is_empty() {
+        if !self.dupes.is_empty() {
+            let total_wasted: u64 = self.dupes.iter().map(|g| g.wasted()).sum();
+            let hidden = if self.hide_protected {
+                self.dupes
+                    .iter()
+                    .filter(|g| !filesweep::group_all_user(&g.paths))
+                    .count()
+            } else {
+                0
+            };
             ui.label(format!(
                 "{} duplicate groups — total wasted {}{}",
-                groups.len(),
+                fmt_num(self.dupes.len()),
                 fmt_size(total_wasted),
-                if self.hide_protected && visible.len() < groups.len() {
-                    format!(" (hiding {} system/app groups)", groups.len() - visible.len())
+                if hidden > 0 {
+                    format!(" (hiding {} system/app groups)", fmt_num(hidden))
                 } else {
                     String::new()
                 }
             ));
             ui.add_space(2.0);
         }
-
-        let keeper_of = |size: u64, hash: &str, paths: &[PathBuf]| -> PathBuf {
-            if let Some(k) = self.keeper_choice.get(&(size, hash.to_string())) {
-                if paths.contains(k) {
-                    return k.clone();
-                }
-            }
-            paths
-                .iter()
-                .min_by(|a, b| {
-                    a.as_os_str()
-                        .len()
-                        .cmp(&b.as_os_str().len())
-                        .then_with(|| a.cmp(b))
-                })
-                .unwrap()
-                .clone()
-        };
-        let mut group_quick: Option<(Vec<PathBuf>, PathBuf, usize)> = None;
-        let mut keep_pick: Option<((u64, String), PathBuf, usize)> = None;
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                for (gi, (size, count, wasted, paths, all_user, hardlinked, hash)) in visible.iter().enumerate() {
-                    let mut title = format!(
-                        "Group {}: {} × {} copies — {} wasted",
-                        gi + 1,
-                        fmt_size(*size),
-                        count,
-                        fmt_size(*wasted)
-                    );
-                    if *hardlinked {
-                        title += " — 🔗 hardlink, uses no real extra space";
-                    }
-                    if !all_user {
-                        title += " — ⚠ system/app zone";
-                    }
-                    let mut rt = egui::RichText::new(title).strong();
-                    if !all_user {
-                        rt = rt.color(egui::Color32::from_rgb(240, 190, 90));
-                    }
-                    egui::CollapsingHeader::new(rt)
-                        .id_salt(gi)
-                        .default_open(gi < 5)
-                        .show(ui, |ui| {
-                            if *hardlinked {
-                                ui.label(
-                                    egui::RichText::new("These paths all point to a single physical copy of the data (hardlink) — deleting one name frees no space, so this group is excluded from the wasted total and Safe quick-select skips it.")
-                                        .color(egui::Color32::from_rgb(140, 200, 255)),
-                                );
-                            }
-                            if !all_user {
-                                ui.label(
-                                    egui::RichText::new("This group has copies in system/app zones (Windows, Program Files, Pinokio store, conda, Sandbox...) — quick-select skips it. Tick manually only if you really know what you are doing.")
-                                        .color(egui::Color32::from_rgb(240, 190, 90)),
-                                );
-                            }
-                            if !*hardlinked {
-                                let keeper = keeper_of(*size, hash, paths);
-                                let user_chosen = self
-                                    .keeper_choice
-                                    .get(&(*size, hash.clone()))
-                                    .map(|k| paths.contains(k))
-                                    .unwrap_or(false);
-                                ui.label(
-                                    egui::RichText::new(format!(
-                                        "🛡 Keeper: {}{}",
-                                        keeper.display(),
-                                        if user_chosen { " (your pick)" } else { "" }
-                                    ))
-                                    .color(egui::Color32::from_rgb(130, 215, 165)),
-                                );
-                                let keeper_name = keeper
-                                    .file_name()
-                                    .map(|n| n.to_string_lossy().into_owned())
-                                    .unwrap_or_default();
-                                if ui
-                                    .button(format!(
-                                        "⚡ Tick extra copies in this group (keeping: {})",
-                                        keeper_name
-                                    ))
-                                    .on_hover_text(format!(
-                                        "Keeper: {}\nTick every other copy in this group — this group only. You still press delete yourself afterwards.",
-                                        keeper.display()
-                                    ))
-                                    .clicked()
-                                {
-                                    group_quick = Some((paths.clone(), keeper, gi + 1));
+        if self.dupe_rows_dirty {
+            self.rebuild_dupe_rows();
+        }
+        let App {
+            dupes,
+            dupe_rows,
+            dupe_open,
+            dupe_rows_dirty,
+            selected,
+            keeper_choice,
+            confirm_delete,
+            dupes_perm_arm,
+            status,
+            ..
+        } = &mut *self;
+        TableBuilder::new(ui)
+            .striped(false)
+            .resizable(true)
+            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+            .column(Column::initial(30.0).range(28.0..=36.0))
+            .column(Column::remainder().clip(true).resizable(false))
+            .column(Column::initial(92.0).range(70.0..=160.0))
+            .column(Column::initial(96.0).range(80.0..=150.0))
+            .column(Column::initial(172.0).range(150.0..=210.0))
+            .header(24.0, |mut header| {
+                header.col(|ui| {
+                    ui.label("");
+                });
+                header.col(|ui| {
+                    ui.label(egui::RichText::new("File / group").strong());
+                });
+                header.col(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(egui::RichText::new("Size").strong());
+                    });
+                });
+                header.col(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(egui::RichText::new("Wasted").strong());
+                    });
+                });
+                header.col(|ui| {
+                    ui.label(egui::RichText::new("Actions").strong());
+                });
+            })
+            .body(|body| {
+                body.rows(22.0, dupe_rows.len(), |mut row| {
+                    match dupe_rows[row.index()] {
+                        DupeRow::Header(gi, ord) => {
+                            let g = &dupes[gi];
+                            let key = (g.size, g.hash.clone());
+                            let is_open = dupe_open.contains(&key);
+                            let all_user = filesweep::group_all_user(&g.paths);
+                            let keeper = dupe_keeper(keeper_choice, g);
+                            row.col(|ui| {
+                                if ui.small_button(if is_open { "▾" } else { "▸" }).clicked() {
+                                    if is_open {
+                                        dupe_open.remove(&key);
+                                    } else {
+                                        dupe_open.insert(key.clone());
+                                    }
+                                    *dupe_rows_dirty = true;
                                 }
-                            }
-                            for p in paths {
-                                ui.horizontal(|ui| {
-                                    let mut checked = self.selected.contains(p);
-                                    let resp =
-                                        ui.checkbox(&mut checked, p.display().to_string());
-                                    if resp.changed() {
-                                        if checked {
-                                            self.selected.insert(p.clone());
+                            });
+                            row.col(|ui| {
+                                let mut title = format!(
+                                    "Group {} · {} × {} copies",
+                                    ord,
+                                    fmt_size(g.size),
+                                    g.paths.len()
+                                );
+                                if g.hardlinked {
+                                    title += " · 🔗 hardlink";
+                                }
+                                if !all_user {
+                                    title += " · ⚠ system/app zone";
+                                }
+                                let mut rt = egui::RichText::new(title).strong();
+                                if !all_user {
+                                    rt = rt.color(egui::Color32::from_rgb(240, 190, 90));
+                                }
+                                ui.label(rt)
+                                    .on_hover_text(format!("Keeper: {}", keeper.display()));
+                            });
+                            row.col(|ui| {
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        ui.label(fmt_size(g.size));
+                                    },
+                                );
+                            });
+                            row.col(|ui| {
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if g.hardlinked {
+                                            ui.label(egui::RichText::new("0 B").color(MUTED));
                                         } else {
-                                            self.selected.remove(p);
+                                            ui.label(
+                                                egui::RichText::new(fmt_size(g.wasted())).color(
+                                                    egui::Color32::from_rgb(240, 170, 100),
+                                                ),
+                                            );
                                         }
-                                        self.confirm_delete = false;
-                                    }
-                                    if ui.small_button("↗ Open").clicked() {
-                                        if let Some(parent) = p.parent() {
-                                            let _ = open::that(parent);
+                                    },
+                                );
+                            });
+                            row.col(|ui| {
+                                if !g.hardlinked
+                                    && ui
+                                        .small_button("⚡ Tick extra copies")
+                                        .on_hover_text(format!(
+                                            "Keeper: {}\nTick every other copy in this group — this group only. You still press delete yourself afterwards.",
+                                            keeper.display()
+                                        ))
+                                        .clicked()
+                                {
+                                    let mut n = 0usize;
+                                    for p in &g.paths {
+                                        if *p != keeper && selected.insert(p.clone()) {
+                                            n += 1;
                                         }
                                     }
-                                    if !*hardlinked
-                                        && ui
-                                            .small_button("★ Keep")
-                                            .on_hover_text("Keep this copy — treat the rest of the group as duplicates")
-                                            .clicked()
-                                    {
-                                        keep_pick =
-                                            Some(((*size, hash.clone()), p.clone(), gi + 1));
+                                    *confirm_delete = false;
+                                    *dupes_perm_arm = false;
+                                    *status = format!(
+                                        "Ticked {} extra copies in group {} — keeping: {}. Review before deleting.",
+                                        fmt_num(n),
+                                        ord,
+                                        keeper.display()
+                                    );
+                                }
+                            });
+                        }
+                        DupeRow::File(gi, ord, pi) => {
+                            let g = &dupes[gi];
+                            let p = &g.paths[pi];
+                            let keeper = dupe_keeper(keeper_choice, g);
+                            let is_keeper = !g.hardlinked && *p == keeper;
+                            row.col(|ui| {
+                                let mut on = selected.contains(p);
+                                if ui.checkbox(&mut on, "").changed() {
+                                    if on {
+                                        selected.insert(p.clone());
+                                    } else {
+                                        selected.remove(p);
                                     }
+                                    *confirm_delete = false;
+                                }
+                            });
+                            row.col(|ui| {
+                                ui.horizontal(|ui| {
+                                    if is_keeper {
+                                        ui.label(egui::RichText::new("🛡").color(
+                                            egui::Color32::from_rgb(130, 215, 165),
+                                        ));
+                                    }
+                                    let mut rt = egui::RichText::new(p.display().to_string());
+                                    if is_keeper {
+                                        rt = rt.color(egui::Color32::from_rgb(130, 215, 165));
+                                    }
+                                    ui.label(rt).on_hover_text(p.display().to_string());
                                 });
-                            }
-                        });
-                }
+                            });
+                            row.col(|ui| {
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        ui.label(fmt_size(g.size));
+                                    },
+                                );
+                            });
+                            row.col(|ui| {
+                                ui.label("");
+                            });
+                            row.col(|ui| {
+                                if ui.small_button("↗ Open").clicked() {
+                                    if let Some(parent) = p.parent() {
+                                        let _ = open::that(parent);
+                                    }
+                                }
+                                if !g.hardlinked
+                                    && ui
+                                        .small_button("★ Keep")
+                                        .on_hover_text("Keep this copy — treat the rest of the group as duplicates")
+                                        .clicked()
+                                {
+                                    keeper_choice.insert((g.size, g.hash.clone()), p.clone());
+                                    *status = format!(
+                                        "Set {} as the keeper of group {} — press the ⚡ button in that group to tick the other copies.",
+                                        p.display(),
+                                        ord
+                                    );
+                                }
+                            });
+                        }
+                    }
+                });
             });
-        if let Some((key, path, gno)) = keep_pick {
-            self.keeper_choice.insert(key, path.clone());
-            self.status = format!(
-                "Set {} as the keeper of group {} — press the ⚡ button in that group to tick the other copies.",
-                path.display(),
-                gno
-            );
-        }
-        if let Some((paths, keeper, gno)) = group_quick {
-            let mut n = 0usize;
-            for p in &paths {
-                if *p != keeper && self.selected.insert(p.clone()) {
-                    n += 1;
-                }
-            }
-            self.confirm_delete = false;
-            self.dupes_perm_arm = false;
-            self.status = format!(
-                "Ticked {} extra copies in group {} — keeping: {}. Review before deleting.",
-                fmt_num(n),
-                gno,
-                keeper.display()
-            );
-        }
     }
 
     fn ui_suggest(&mut self, ui: &mut egui::Ui) {
@@ -3102,7 +3216,7 @@ impl App {
         let mut tsort = self.toplevel_sort;
         ui.push_id("toplevel-table", |ui| {
             TableBuilder::new(ui)
-                .striped(true)
+                .striped(false)
                 .resizable(true)
                 .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
                 .column(Column::remainder().clip(true).resizable(false))

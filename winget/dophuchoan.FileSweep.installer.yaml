@@ -1,15 +1,15 @@
 PackageIdentifier: dophuchoan.FileSweep
-PackageVersion: 1.2.0
+PackageVersion: 1.3.0
 InstallerType: zip
 NestedInstallerType: portable
 Installers:
   - Architecture: x64
-    InstallerUrl: https://github.com/dophuchoan/filesweep/releases/download/v1.2.0/FileSweep-v1.2.0.zip
-    InstallerSha256: D31D3D87E1EBFEC69D33C92EA4FB87F784DD5BEE32B0EC0E4FF918A5E3C1F80C
+    InstallerUrl: https://github.com/dophuchoan/filesweep/releases/download/v1.3.0/FileSweep-v1.3.0.zip
+    InstallerSha256: 737C1A13BD5B5BBD3D9335EC4152C0CE87447D122F6EA8B232D54EAEB459DDA7
     NestedInstallerFiles:
-      - RelativeFilePath: FileSweep-v1.2.0/FileSweep.exe
+      - RelativeFilePath: FileSweep-v1.3.0/FileSweep.exe
         PortableCommandAlias: FileSweep
-      - RelativeFilePath: FileSweep-v1.2.0/filesweep-cli.exe
+      - RelativeFilePath: FileSweep-v1.3.0/filesweep-cli.exe
         PortableCommandAlias: filesweep-cli
     ReleaseDate: 2026-11-13
 ManifestType: installer
