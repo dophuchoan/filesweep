@@ -1,0 +1,7 @@
+[target.x86_64-pc-windows-gnu]
+linker = "rust-lld"
+rustflags = [
+    "-L", "native=/home/hatch/mingwtools/root/usr/x86_64-w64-mingw32/lib",
+    "-L", "native=/home/hatch/mingwtools/root/usr/lib/gcc/x86_64-w64-mingw32/13-posix",
+    "-C", "link-arg=/home/hatch/mingwtools/root/usr/x86_64-w64-mingw32/lib/crt2.o",
+]
