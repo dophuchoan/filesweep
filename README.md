@@ -2,9 +2,21 @@
 
 **Fast file search, duplicate finder and disk cleanup for Windows — one small native app, no installer, no telemetry.**
 
-![FileSweep screenshot](screenshot.png)
+![FileSweep finding duplicate AI model files](screenshot-duplicates.png)
 
 FileSweep scans a drive once, then lets you search millions of files instantly, find true duplicates by content hash, and see exactly what is eating your disk — with cleanup suggestions that are conservative by design.
+
+## Built for the AI era: your models are everywhere
+
+A modern AI setup scatters **multi-gigabyte model files all over your drives** — ComfyUI checkpoints and LoRAs, Pinokio apps each with their own model folders, fine-tunes, downloads you forgot about. A single checkpoint is 8–25 GB, and the same file often sits in two or three places at once. Keeping a disk healthy in this era means constantly answering two questions: *where did my space go?* and *which of these copies do I actually still need?*
+
+That is exactly what FileSweep is built for:
+
+- **Fast from the first second** — the screenshot below is a real 2.5 TB drive: **907,669 files indexed in ~5 seconds**, then every search, sort and selection is instant. Picking the files you no longer need is a few clicks: tick whole duplicate groups with one button, multi-select in the largest-files list, done.
+- **Hardlink-safe** — AI tools love sharing one physical model file across many folders via *hardlinks* (shared model pools in tools like Pinokio/Maestro work this way). Ordinary duplicate cleaners count hardlinks as wasted gigabytes — and deleting the wrong "copy" can corrupt the shared file, break the model, and cost you a multi-GB re-download. FileSweep detects hardlinked groups by physical file identity, flags them 🔗, counts them as **0 B wasted**, and never quick-selects them.
+- **App-managed files are left alone** — protected zones (Pinokio/PionLogin stores, Windows, Program Files, AppData, conda envs) are never bulk-ticked; for app-owned duplicates you decide group by group, with the keeper always visible.
+
+![FileSweep disk overview on a 2.5 TB drive — 907,669 files scanned in about 5 seconds, 5 unneeded files (76.11 GB) selected](screenshot-disk.png)
 
 ## Features
 
